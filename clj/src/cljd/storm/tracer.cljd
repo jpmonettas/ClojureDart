@@ -1,0 +1,40 @@
+(ns cljd.storm.tracer)
+
+(def trace-expr-fn      (fn [& args] (println "@@@ trace-expr-fn " args)))
+(def trace-fn-call-fn   (fn [& args] (println "@@@ trace-fn-call-fn " args)))
+(def trace-fn-return-fn (fn [& args] (println "@@@ trace-fn-return-fn " args)))
+(def trace-fn-unwind-fn (fn [& args] (println "@@@ trace-fn-unwind-fn " args)))
+(def trace-bind-fn      (fn [& args] (println "@@@ trace-bind-fn " args)))
+(def trace-form-init-fn (fn [& args] (println "@@@ trace-form-init-fn " args)))
+
+(defn trace-fn-call [fn-args fn-ns fn-name form-id]
+  (when trace-fn-call-fn
+    (trace-fn-call-fn nil fn-ns fn-name fn-args form-id)))
+
+(defn trace-expr [val coord form-id]
+  (when trace-expr-fn
+    (trace-expr-fn nil val coord form-id))
+  val)
+
+(defn trace-fn-return [ret-val coord form-id]
+  (when trace-fn-return-fn
+    (trace-fn-return-fn nil ret-val coord form-id))
+  ret-val)
+
+(defn trace-fn-unwind [error coord form-id]
+  (when trace-fn-unwind-fn
+    (trace-fn-unwind-fn nil error coord form-id)))
+
+(defn trace-bind [val coord sym-name]
+  (when trace-bind-fn
+    (trace-bind-fn nil coord sym-name val)))
+
+(defn register-form [form-id form-ns form]
+  (when trace-form-init-fn
+    (let [form-data {:form-id form-id
+                     :ns form-ns
+                     :form form
+                     :file nil
+                     :line nil}]
+      (trace-form-init-fn form-data)))
+  nil)

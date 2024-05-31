@@ -10,7 +10,9 @@
   (:refer-clojure :exclude [macroexpand macroexpand-1 munge compile read])
   (:require [clojure.string :as str]
             [clojure.java.io :as io]
-            [clojure.edn :as edn]))
+            [clojure.edn :as edn]
+            [cljd.storm.utils :as storm-utils]
+            [cljd.storm.emitter :as storm-emitter]))
 
 (defn read [opts in]
   (cljd.lang.LispReader/read in opts))
@@ -352,6 +354,7 @@
      List dart:core/List}})
 
 (declare ^:dynamic *current-ns*)
+(declare ^:dynamic *storm-form-id*)
 
 (def nses (atom {:libs {"dart:core" {:dart-alias "dc" :ns nil}
                         "dart:async" {:dart-alias "da" :ns nil}} ; dc can't clash with user aliases because they go through dart-global
@@ -1191,7 +1194,8 @@
           (hint-as (apply inline args) tag)
           :else form))
       form)
-    (propagate-hints form)))
+    (propagate-hints form)
+    (storm-utils/merge-meta (meta form))))
 
 (defn resolve-static-member [sym]
   (or
@@ -2274,7 +2278,7 @@
   (let [dart-locals (closed-overs (emit expr env) env)]
     (into #{} (keep (fn [[k v]] (when (dart-locals v) k))) env)))
 
-(defn- emit-dart-fn [async fn-name [params & body] env]
+(defn- emit-dart-fn [async fn-name [params & body] env] ;; @STORM emit-dart-fn
   (let [ret-type (some-> (or (:tag (meta fn-name)) (:tag (meta params))) (emit-type env))
         ; there's definitely an overlap between parse-dart-params and dart-method-sig
         ; TODO we should strive to consolidate them as one if possible
@@ -2366,7 +2370,7 @@
       (list 'dart/let mutable-closed-overs dart-fn)
       dart-fn)))
 
-(defn emit-fn* [[fn* & bodies :as form] env]
+(defn emit-fn* [[fn* & bodies :as form] env] ;; @STORM emit-fn*
   (let [{:keys [async]} (meta form)
         var-name (some-> fn* meta :var-name)
         name (when (symbol? (first bodies)) (first bodies))
@@ -3019,7 +3023,8 @@
               (throw (ex-info "doc-string must be a string" {})))
           (throw (ex-info "Too many arguments to def" {})))
         sym (vary-meta sym assoc :doc doc-string)
-        expr (macroexpand env expr)
+        ;; @STORM tag here before macroexpansion
+        expr (macroexpand env expr) ;; @STORM macroexpand being called again on expression emit-def
         kind (case (:dart/fn-type (dart-meta sym env))
                :native :dart
                :ifn :clj
@@ -3331,7 +3336,7 @@
   "Takes a clojure form and a lexical environment and returns a dartsexp."
   [x env]
   (try
-    (let [x (macroexpand-and-inline env x) ;; meta dc-nim
+    (let [ x (macroexpand-and-inline env x) ;; meta dc-nim
           dart-x
           (cond
             (symbol? x) (emit-symbol x env)
@@ -3382,17 +3387,23 @@
                            defprotocol* emit-defprotocol*
                            extend-type-protocol* emit-extend-type-protocol*
                            emit-fn-call)
-                         emit-fn-call)]
+                         emit-fn-call)]              
               (binding [*source-info* (let [{:keys [line column]} (meta x)]
                                         (if line
                                           {:line line :column column}
                                           *source-info*))]
-                (emit x env)))
+                (-> (emit x env)
+                    (storm-emitter/maybe-instrument-wrap-expr x
+                                                              (some-> x meta :cljd.storm/coord)
+                                                              *current-ns*
+                                                              *storm-form-id*))))
             (and (tagged-literal? x) (= 'dart (:tag x))) (emit-dart-literal (:form x) env)
             (coll? x) (emit-coll x env)
             :else (throw (ex-info (str "Can't compile " (pr-str x)) {:form x})))
           {:dart/keys [const type]} (dart-meta x env)
           inferred-const (:dart/const (meta dart-x))]
+      (when-let [coord (:cljd.storm/coord (meta x))] ;; @@@@@
+        (str coord " " x " " dart-x))
       (when (and const (not inferred-const))
         (println "🤔 Unexpected ^:const, if it passes Dart compilation, please open a ClojureDart issue" (pr-str x) (source-info)))
       (when (and (false? const) (not inferred-const))
@@ -4402,10 +4413,19 @@
      (with-cljd-reader
        (let [in (clojure.lang.LineNumberingPushbackReader. in)]
          (loop []
-           (let [form (read {:eof in :read-cond :allow :features #{:cljd}} in)]
+           (let [form (read {:eof in :read-cond :allow :features #{:cljd}} in)] ;; @STORM reading form
              (when-not (identical? form in)
                (try
-                 (binding [*locals-gen* {}] (emit form {}))
+                 (binding [*locals-gen* {}]
+                   (if-not (storm-emitter/skip-instrumentation? *current-ns*)
+                     ;; storm instrument path
+                     (binding [*storm-form-id* (hash form)]
+                       #_(storm-tracer/register-form *storm-form-id* *current-ns* form) ;; where to emit form registration?
+                       (emit (storm-utils/tag-form-recursively form :cljd.storm/coord)
+                             {}))
+
+                     ;; else, default path
+                     (emit form {})))
                  (catch Exception e
                    (throw (if (::emit-stack (ex-data e))
                             e
