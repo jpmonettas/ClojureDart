@@ -1,7 +1,11 @@
 (ns cljd.storm.emitter
   (:require [clojure.string :as str]))
 
-#?(:clj (def instrument-enable
+(declare ^:dynamic *storm-form-id*)
+(declare ^:dynamic *storm-form*)
+(declare ^:dynamic *forms-to-register*)
+
+#?(:clj (def ^:dynamic *instrument-enable*
           (some-> (System/getProperty "cljs.storm.instrumentEnable")
                   Boolean/parseBoolean)))
 
@@ -18,7 +22,7 @@
             (re-pattern re))))
 
 #?(:clj (defn set-instrumentation [on?]
-          (alter-var-root #'instrument-enable (constantly on?))))
+          (alter-var-root #'*instrument-enable* (constantly on?))))
 
 #?(:clj (defn add-instrumentation-only-prefix [p]
           (alter-var-root #'instrument-only-prefixes conj p)))
@@ -53,12 +57,11 @@
                               instrument?
                               (and instrument? (not (re-find instrument-skip-regex nsname))))]
             ;; skip iff
-            (or (not instrument-enable)
+            (or (not *instrument-enable*)
                 (not instrument?)))))
 
 (defn maybe-instrument-wrap-expr [dart-x x coord ns form-id]
-  (if (and (not (= form-id -480351059))
-           coord
+  (if (and coord
            (not (skip-instrumentation? ns)))
     (let [str-coord (str/join "," coord)
           sym (gensym "storm_expr_")]
@@ -67,3 +70,14 @@
          (lcocs_tracer.trace_expr ~sym ~str-coord ~form-id)
          sym#))
     dart-x))
+
+(defn pre-register-form [ns form-id form]
+  (swap! *forms-to-register*
+         conj
+         {:ns-symb ns
+          :form-id form-id
+          :form form}))
+
+(defn pre-registered-forms []
+  (when *forms-to-register*
+    (deref *forms-to-register*)))

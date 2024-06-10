@@ -354,7 +354,6 @@
      List dart:core/List}})
 
 (declare ^:dynamic *current-ns*)
-(declare ^:dynamic *storm-form-id*)
 
 (def nses (atom {:libs {"dart:core" {:dart-alias "dc" :ns nil}
                         "dart:async" {:dart-alias "da" :ns nil}} ; dc can't clash with user aliases because they go through dart-global
@@ -2375,6 +2374,16 @@
         var-name (some-> fn* meta :var-name)
         name (when (symbol? (first bodies)) (first bodies))
         bodies (cond-> bodies name next)
+        bodies (if (= var-name 'main)
+                 (let [[main-only-sig] bodies
+                       [main-params-vec & main-exprs] main-only-sig
+                       storm-forms-registers (->> (storm-emitter/pre-registered-forms)
+                                                  (mapv (fn [{:keys [ns-symb form-id form]}]
+                                                          `(cljd.storm.tracer/register-form ~form-id ~(str ns-symb) (quote ~form)))))]
+                   `((~main-params-vec
+                      ~@storm-forms-registers
+                      ~@main-exprs)))
+                 bodies)
         [body & more-bodies :as bodies] (ensure-bodies bodies)
         fn-type (if (or more-bodies (variadic? body)) :ifn :native)
         env (cond-> env
@@ -3074,6 +3083,9 @@
         dart-code
         (when-not *host-eval*
           (with-dart-str
+            
+            (storm-emitter/pre-register-form *current-ns* storm-emitter/*storm-form-id* storm-emitter/*storm-form*)            
+            
             (write-annotations dart-annotations)
             (cond
               (:dynamic (meta sym))
@@ -3396,7 +3408,7 @@
                     (storm-emitter/maybe-instrument-wrap-expr x
                                                               (some-> x meta :cljd.storm/coord)
                                                               *current-ns*
-                                                              *storm-form-id*))))
+                                                              storm-emitter/*storm-form-id*))))
             (and (tagged-literal? x) (= 'dart (:tag x))) (emit-dart-literal (:form x) env)
             (coll? x) (emit-coll x env)
             :else (throw (ex-info (str "Can't compile " (pr-str x)) {:form x})))
@@ -4411,26 +4423,27 @@
 (defn load-input [in]
   #?(:clj
      (with-cljd-reader
-       (let [in (clojure.lang.LineNumberingPushbackReader. in)]
-         (loop []
-           (let [form (read {:eof in :read-cond :allow :features #{:cljd}} in)] ;; @STORM reading form
-             (when-not (identical? form in)
-               (try
-                 (binding [*locals-gen* {}]
-                   (if-not (storm-emitter/skip-instrumentation? *current-ns*)
-                     ;; storm instrument path
-                     (binding [*storm-form-id* (hash form)]
-                       #_(storm-tracer/register-form *storm-form-id* *current-ns* form) ;; where to emit form registration?
+       (let [in (clojure.lang.LineNumberingPushbackReader. in)]         
+         (binding [storm-emitter/*forms-to-register* (atom [])]
+           (loop []
+             (let [form (read {:eof in :read-cond :allow :features #{:cljd}} in)] ;; @STORM reading form
+               (when-not (identical? form in)
+                 (try
+                   (binding [*locals-gen* {}
+                             storm-emitter/*storm-form* form
+                             storm-emitter/*storm-form-id* (hash form)]
+                     (if-not (storm-emitter/skip-instrumentation? *current-ns*)
+                       ;; storm instrument path
                        (emit (storm-utils/tag-form-recursively form :cljd.storm/coord)
-                             {}))
+                             {})
 
-                     ;; else, default path
-                     (emit form {})))
-                 (catch Exception e
-                   (throw (if (::emit-stack (ex-data e))
-                            e
-                            (ex-info "Compilation error." {:form form} e)))))
-               (recur))))))))
+                       ;; else, default path
+                       (emit form {})))
+                   (catch Exception e
+                     (throw (if (::emit-stack (ex-data e))
+                              e
+                              (ex-info "Compilation error." {:form form} e)))))
+                 (recur)))))))))
 
 (defn host-load-input [in]
   #?(:clj
